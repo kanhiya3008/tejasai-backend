@@ -5,10 +5,12 @@ import json
 from datetime import datetime
 from typing import Optional
 
+import traceback
 import resend
 import razorpay
 from fastapi import FastAPI, HTTPException, Request, Header, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr
 from dotenv import load_dotenv
 
@@ -34,6 +36,13 @@ app = FastAPI(
     description="License key generation, validation, and management for Ultra Secure Flutter Kit",
     version="1.0.0",
 )
+
+# ── Global exception handler — surfaces real errors in logs ───
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    print(f"Unhandled error on {request.method} {request.url.path}:")
+    print(traceback.format_exc())
+    return JSONResponse(status_code=500, content={"detail": str(exc)})
 
 # ── CORS ──────────────────────────────────────────────────────
 # allow_origins=["*"] cannot be combined with allow_credentials=True in Starlette;

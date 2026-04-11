@@ -13,18 +13,19 @@ def _init_firebase():
 
     cred_b64 = os.getenv("FIREBASE_CREDENTIALS_B64")
 
-    if not cred_b64:
-        raise Exception("Missing FIREBASE_CREDENTIALS_B64")
-
     try:
-        decoded = base64.b64decode(cred_b64)
+        if cred_b64:
+            # Production (Railway): decode base64 → write to temp file → load
+            decoded = base64.b64decode(cred_b64)
+            with open("/tmp/firebase.json", "wb") as f:
+                f.write(decoded)
+            cred = credentials.Certificate("/tmp/firebase.json")
+        else:
+            # Local development: load from file path
+            cred_path = os.getenv("FIREBASE_CREDENTIALS_PATH", "firebase-credentials.json")
+            cred = credentials.Certificate(cred_path)
 
-        with open("/tmp/firebase.json", "wb") as f:
-            f.write(decoded)
-
-        cred = credentials.Certificate("/tmp/firebase.json")
         firebase_admin.initialize_app(cred)
-
         print("Firebase initialized successfully")
 
     except Exception as e:
