@@ -15,31 +15,51 @@ def _init_firebase():
 
     try:
         if cred_b64:
-            # Production (Railway): decode base64 → write to temp file → load
+            # Production (Railway)
             decoded = base64.b64decode(cred_b64)
-            with open("/tmp/firebase.json", "wb") as f:
+            temp_path = "/tmp/firebase.json"
+
+            with open(temp_path, "wb") as f:
                 f.write(decoded)
-            cred = credentials.Certificate("/tmp/firebase.json")
+
+            cred = credentials.Certificate(temp_path)
+
         else:
-            # Local development: load from file path
-            cred_path = os.getenv("FIREBASE_CREDENTIALS_PATH", "firebase-credentials.json")
+            # Local development
+            cred_path = os.getenv(
+                "FIREBASE_CREDENTIALS_PATH",
+                "firebase-credentials.json"
+            )
             cred = credentials.Certificate(cred_path)
 
+        # Initialize Firebase
         firebase_admin.initialize_app(cred)
-        print("Firebase initialized successfully")
+
+        # ✅ Force correct project binding (VERY IMPORTANT)
+        os.environ["GOOGLE_CLOUD_PROJECT"] = cred.project_id
+
+        print(f"✅ Firebase initialized for project: {cred.project_id}")
 
     except Exception as e:
-        print("Firebase init failed:", str(e))
+        print("❌ Firebase init failed:", str(e))
         raise e
 
+
+# Initialize Firebase
 _init_firebase()
 
-# ── Firestore client ──────────────────────────────────────────
-# db = firestore.client()
-db = firestore.client()
+# ── Firestore client (FINAL FIX) ──────────────────────────────
+try:
+    db = firestore.client()   # ✅ DO NOT pass project or database
+    print("✅ Firestore client connected")
+
+except Exception as e:
+    print("❌ Firestore client error:", str(e))
+    raise e
+
 
 # ── Collection references ─────────────────────────────────────
-licenses_col    = db.collection("licenses")
-usage_logs_col  = db.collection("usage_logs")
-trials_col      = db.collection("trials")
-payments_col    = db.collection("payments")
+licenses_col   = db.collection("licenses")
+usage_logs_col = db.collection("usage_logs")
+trials_col     = db.collection("trials")
+payments_col   = db.collection("payments")
