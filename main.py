@@ -337,33 +337,31 @@ async def validate_license(body: ValidateRequest):
         doc.reference.update({"bundle_ids": bundle_ids})
         print(f"[VALIDATE] Added bundle_id to license")
 
-        # Auto-register app in apps collection
-        try:
-            owner_email = data.get('email', '')
-            existing_app = list(db.collection('apps')
-                .where('bundleId', '==', bundle_id)
-                .where('ownerEmail', '==', owner_email)
-                .limit(1).get())
-            print(f"[VALIDATE] Existing app records: {len(existing_app)}")
-            if not existing_app:
-                app_doc = {
-                    'ownerEmail': owner_email,
-                    'bundleId':   bundle_id,
-                    'appName':    bundle_id.split('.')[-1].title(),
-                    'platform':   body.platform,
-                    'isActive':   True,
-                    'licenseKey': body.license_key[:8],
-                    'plan':       plan,
-                    'addedAt':    datetime.utcnow().isoformat(),
-                }
-                db.collection('apps').add(app_doc)
-                print(f"[VALIDATE] App registered successfully: {app_doc}")
-            else:
-                print("[VALIDATE] App already exists, skipping")
-        except Exception:
-            print(f"[VALIDATE] App registration FAILED: {traceback.format_exc()}")
-    else:
-        print(f"[VALIDATE] bundle_id already registered, skipping app registration")
+    # Always ensure app is registered in apps collection (runs on every validation)
+    try:
+        owner_email = data.get('email', '')
+        existing_app = list(db.collection('apps')
+            .where('bundleId', '==', bundle_id)
+            .where('ownerEmail', '==', owner_email)
+            .limit(1).get())
+        print(f"[VALIDATE] Existing app records: {len(existing_app)}")
+        if not existing_app:
+            app_doc = {
+                'ownerEmail': owner_email,
+                'bundleId':   bundle_id,
+                'appName':    bundle_id.split('.')[-1].title(),
+                'platform':   body.platform,
+                'isActive':   True,
+                'licenseKey': body.license_key[:8],
+                'plan':       plan,
+                'addedAt':    datetime.utcnow().isoformat(),
+            }
+            db.collection('apps').add(app_doc)
+            print(f"[VALIDATE] App registered successfully: {app_doc}")
+        else:
+            print("[VALIDATE] App already exists, skipping")
+    except Exception:
+        print(f"[VALIDATE] App registration FAILED: {traceback.format_exc()}")
 
     # Log usage (don't fail validation if logging fails)
     try:
