@@ -273,20 +273,26 @@ async def validate_license(body: ValidateRequest):
     Checks if license is valid, active, and not expired.
     Returns features dict so plugin knows what to enable.
     """
-    key_hash = hash_key(body.license_key)
+    print(f"[VALIDATE] key={body.license_key[:8]}... bundle={body.bundle_id}")
 
-    # Find license by hash
+    key_hash = hash_key(body.license_key)
+    print(f"[VALIDATE] key_hash={key_hash[:16]}...")
+
     results = licenses_col.where("key_hash", "==", key_hash).limit(1).get()
     docs = list(results)
+    print(f"[VALIDATE] found {len(docs)} license(s)")
 
     if not docs:
+        print("[VALIDATE] License not found")
         return {"valid": False, "reason": "invalid_key", "message": "Invalid license key"}
 
     doc = docs[0]
     data = doc.to_dict()
+    print(f"[VALIDATE] License found: email={data.get('email')} plan={data.get('plan')}")
 
     # Paid plans only
     plan = data.get("plan", "")
+    print(f"[VALIDATE] Plan check: {plan} in {PAID_PLANS} = {plan in PAID_PLANS}")
     if plan not in PAID_PLANS:
         return {
             "valid": False,
@@ -316,9 +322,12 @@ async def validate_license(body: ValidateRequest):
     bundle_id = body.bundle_id
     bundle_ids = data.get("bundle_ids", [])
     app_limit = data.get("app_limit", 1)
+    print(f"[VALIDATE] bundle_ids={bundle_ids} app_limit={app_limit}")
 
     if bundle_id not in bundle_ids:
+        print(f"[VALIDATE] New bundle_id. limit={app_limit} current={len(bundle_ids)}")
         if len(bundle_ids) >= app_limit:
+            print("[VALIDATE] App limit reached!")
             return {
                 "valid": False,
                 "reason": "app_limit_reached",
@@ -326,28 +335,35 @@ async def validate_license(body: ValidateRequest):
             }
         bundle_ids.append(bundle_id)
         doc.reference.update({"bundle_ids": bundle_ids})
+        print(f"[VALIDATE] Added bundle_id to license")
 
         # Auto-register app in apps collection
         try:
             owner_email = data.get('email', '')
-            existing_app = db.collection('apps') \
-                .where('bundleId', '==', bundle_id) \
-                .where('ownerEmail', '==', owner_email) \
-                .limit(1).get()
-            if not list(existing_app):
-                db.collection('apps').add({
+            existing_app = list(db.collection('apps')
+                .where('bundleId', '==', bundle_id)
+                .where('ownerEmail', '==', owner_email)
+                .limit(1).get())
+            print(f"[VALIDATE] Existing app records: {len(existing_app)}")
+            if not existing_app:
+                app_doc = {
                     'ownerEmail': owner_email,
                     'bundleId':   bundle_id,
                     'appName':    bundle_id.split('.')[-1].title(),
                     'platform':   body.platform,
                     'isActive':   True,
-                    'licenseKey': body.license_key,
+                    'licenseKey': body.license_key[:8],
                     'plan':       plan,
                     'addedAt':    datetime.utcnow().isoformat(),
-                })
-                print(f"App auto-registered: {bundle_id} for {owner_email}")
-        except Exception as e:
-            print(f"App registration error (non-critical): {e}")
+                }
+                db.collection('apps').add(app_doc)
+                print(f"[VALIDATE] App registered successfully: {app_doc}")
+            else:
+                print("[VALIDATE] App already exists, skipping")
+        except Exception:
+            print(f"[VALIDATE] App registration FAILED: {traceback.format_exc()}")
+    else:
+        print(f"[VALIDATE] bundle_id already registered, skipping app registration")
 
     # Log usage (don't fail validation if logging fails)
     try:
