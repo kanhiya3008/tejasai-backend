@@ -180,6 +180,25 @@ def send_welcome_email_with_credentials(
 PAID_PLANS = ['indie', 'pro', 'enterprise']
 
 
+def _create_placeholder_app(email: str, plan: str, key_prefix: str):
+    """Create a placeholder app entry immediately after license is created."""
+    try:
+        db.collection('apps').add({
+            'ownerEmail':    email,
+            'bundleId':      '',
+            'appName':       'My App',
+            'platform':      'unknown',
+            'isActive':      True,
+            'licenseKey':    key_prefix,
+            'plan':          plan,
+            'isPlaceholder': True,
+            'addedAt':       datetime.utcnow().isoformat(),
+        })
+        print(f"[LICENSE] Placeholder app created for {email}")
+    except Exception as e:
+        print(f"[LICENSE] Placeholder app creation failed: {e}")
+
+
 def get_all_features() -> list:
     return [
         "root_detection", "jailbreak_detection", "emulator_detection",
@@ -337,29 +356,47 @@ async def validate_license(body: ValidateRequest):
         doc.reference.update({"bundle_ids": bundle_ids})
         print(f"[VALIDATE] Added bundle_id to license")
 
-    # Always ensure app is registered in apps collection (runs on every validation)
+    # Ensure app is registered — upgrade placeholder if present, else create/verify
     try:
         owner_email = data.get('email', '')
-        existing_app = list(db.collection('apps')
-            .where('bundleId', '==', bundle_id)
+
+        # Check for placeholder app (created at purchase, bundleId still empty)
+        placeholder_apps = list(db.collection('apps')
             .where('ownerEmail', '==', owner_email)
+            .where('isPlaceholder', '==', True)
             .limit(1).get())
-        print(f"[VALIDATE] Existing app records: {len(existing_app)}")
-        if not existing_app:
-            app_doc = {
-                'ownerEmail': owner_email,
-                'bundleId':   bundle_id,
-                'appName':    bundle_id.split('.')[-1].title(),
-                'platform':   body.platform,
-                'isActive':   True,
-                'licenseKey': body.license_key[:8],
-                'plan':       plan,
-                'addedAt':    datetime.utcnow().isoformat(),
-            }
-            db.collection('apps').add(app_doc)
-            print(f"[VALIDATE] App registered successfully: {app_doc}")
+
+        if placeholder_apps:
+            # Upgrade placeholder with real bundle_id
+            placeholder_apps[0].reference.update({
+                'bundleId':      bundle_id,
+                'appName':       bundle_id.split('.')[-1].title(),
+                'platform':      body.platform,
+                'isPlaceholder': False,
+                'firstSeenAt':   datetime.utcnow().isoformat(),
+            })
+            print(f"[VALIDATE] Placeholder upgraded with bundleId: {bundle_id}")
         else:
-            print("[VALIDATE] App already exists, skipping")
+            # No placeholder — ensure app doc exists for this bundle
+            existing_app = list(db.collection('apps')
+                .where('bundleId', '==', bundle_id)
+                .where('ownerEmail', '==', owner_email)
+                .limit(1).get())
+            if not existing_app:
+                db.collection('apps').add({
+                    'ownerEmail':    owner_email,
+                    'bundleId':      bundle_id,
+                    'appName':       bundle_id.split('.')[-1].title(),
+                    'platform':      body.platform,
+                    'isActive':      True,
+                    'licenseKey':    body.license_key[:8],
+                    'plan':          plan,
+                    'isPlaceholder': False,
+                    'addedAt':       datetime.utcnow().isoformat(),
+                })
+                print(f"[VALIDATE] New app registered: {bundle_id}")
+            else:
+                print(f"[VALIDATE] App already exists: {bundle_id}")
     except Exception:
         print(f"[VALIDATE] App registration FAILED: {traceback.format_exc()}")
 
@@ -457,6 +494,7 @@ async def razorpay_webhook(
         }
         license_ref = licenses_col.document()
         license_ref.set(license_data)
+        _create_placeholder_app(email.lower(), plan, key[:8])
 
         # Save payment record
         payments_col.document().set({
@@ -534,6 +572,7 @@ async def create_license_manual(
     }
     license_ref = licenses_col.document()
     license_ref.set(license_data)
+    _create_placeholder_app(body.email.lower(), body.plan, key[:8])
 
     background_tasks.add_task(
         send_license_key_email,
@@ -728,6 +767,7 @@ async def test_create_license(
     }
     license_ref = licenses_col.document()
     license_ref.set(license_data)
+    _create_placeholder_app(email, body.plan, key[:8])
 
     temp_password = create_admin_user(
         email=email,
