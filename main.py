@@ -327,6 +327,28 @@ async def validate_license(body: ValidateRequest):
         bundle_ids.append(bundle_id)
         doc.reference.update({"bundle_ids": bundle_ids})
 
+        # Auto-register app in apps collection
+        try:
+            owner_email = data.get('email', '')
+            existing_app = db.collection('apps') \
+                .where('bundleId', '==', bundle_id) \
+                .where('ownerEmail', '==', owner_email) \
+                .limit(1).get()
+            if not list(existing_app):
+                db.collection('apps').add({
+                    'ownerEmail': owner_email,
+                    'bundleId':   bundle_id,
+                    'appName':    bundle_id.split('.')[-1].title(),
+                    'platform':   body.platform,
+                    'isActive':   True,
+                    'licenseKey': body.license_key,
+                    'plan':       plan,
+                    'addedAt':    datetime.utcnow().isoformat(),
+                })
+                print(f"App auto-registered: {bundle_id} for {owner_email}")
+        except Exception as e:
+            print(f"App registration error (non-critical): {e}")
+
     # Log usage (don't fail validation if logging fails)
     try:
         usage_logs_col.document().set({
