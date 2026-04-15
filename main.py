@@ -181,8 +181,15 @@ PAID_PLANS = ['indie', 'pro', 'enterprise']
 
 
 def _create_placeholder_app(email: str, plan: str, key_prefix: str):
-    """Create a placeholder app entry immediately after license is created."""
+    """Create a placeholder app entry — one per owner, idempotent."""
     try:
+        # Don't create if any app (placeholder or real) already exists for this owner
+        existing = list(db.collection('apps')
+            .where('ownerEmail', '==', email)
+            .limit(1).get())
+        if existing:
+            print(f"[LICENSE] App already exists for {email}, skipping placeholder")
+            return
         db.collection('apps').add({
             'ownerEmail':    email,
             'bundleId':      '',
@@ -356,33 +363,35 @@ async def validate_license(body: ValidateRequest):
         doc.reference.update({"bundle_ids": bundle_ids})
         print(f"[VALIDATE] Added bundle_id to license")
 
-    # Ensure app is registered — upgrade placeholder if present, else create/verify
+    # Ensure app is registered — one doc per owner+bundle, idempotent
     try:
         owner_email = data.get('email', '')
 
-        # Check for placeholder app (created at purchase, bundleId still empty)
-        placeholder_apps = list(db.collection('apps')
+        # Check if a real (non-placeholder) app doc already exists for this bundle
+        existing_real = list(db.collection('apps')
             .where('ownerEmail', '==', owner_email)
-            .where('isPlaceholder', '==', True)
+            .where('bundleId', '==', bundle_id)
             .limit(1).get())
 
-        if placeholder_apps:
-            # Upgrade placeholder with real bundle_id
-            placeholder_apps[0].reference.update({
-                'bundleId':      bundle_id,
-                'appName':       bundle_id.split('.')[-1].title(),
-                'platform':      body.platform,
-                'isPlaceholder': False,
-                'firstSeenAt':   datetime.utcnow().isoformat(),
-            })
-            print(f"[VALIDATE] Placeholder upgraded with bundleId: {bundle_id}")
-        else:
-            # No placeholder — ensure app doc exists for this bundle
-            existing_app = list(db.collection('apps')
-                .where('bundleId', '==', bundle_id)
+        if not existing_real:
+            # Check for placeholder to upgrade
+            placeholder_apps = list(db.collection('apps')
                 .where('ownerEmail', '==', owner_email)
+                .where('isPlaceholder', '==', True)
                 .limit(1).get())
-            if not existing_app:
+
+            if placeholder_apps:
+                # Upgrade placeholder in-place
+                placeholder_apps[0].reference.update({
+                    'bundleId':      bundle_id,
+                    'appName':       bundle_id.split('.')[-1].title(),
+                    'platform':      body.platform,
+                    'isPlaceholder': False,
+                    'firstSeenAt':   datetime.utcnow().isoformat(),
+                })
+                print(f"[VALIDATE] Placeholder upgraded: {bundle_id}")
+            else:
+                # No placeholder — create fresh app doc
                 db.collection('apps').add({
                     'ownerEmail':    owner_email,
                     'bundleId':      bundle_id,
@@ -395,14 +404,16 @@ async def validate_license(body: ValidateRequest):
                     'addedAt':       datetime.utcnow().isoformat(),
                 })
                 print(f"[VALIDATE] New app registered: {bundle_id}")
-            else:
-                print(f"[VALIDATE] App already exists: {bundle_id}")
+        else:
+            print(f"[VALIDATE] App already registered: {bundle_id}")
     except Exception:
         print(f"[VALIDATE] App registration FAILED: {traceback.format_exc()}")
 
-    # Log usage (don't fail validation if logging fails)
+    # Log usage — deduplicate by license+bundle+day to avoid spam
     try:
-        usage_logs_col.document().set({
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        log_doc_id = f"{doc.id}_{bundle_id}_{today}"
+        usage_logs_col.document(log_doc_id).set({
             "license_id": doc.id,
             "bundle_id": bundle_id,
             "platform": body.platform,
