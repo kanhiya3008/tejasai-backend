@@ -15,7 +15,7 @@ from pydantic import BaseModel, EmailStr
 from dotenv import load_dotenv
 
 import firebase_admin.auth as fb_auth
-from database import db, licenses_col, usage_logs_col, trials_col, payments_col
+from database import db, licenses_col, usage_logs_col, payments_col
 from license_utils import (
     generate_license_key,
     hash_key,
@@ -177,6 +177,24 @@ def send_welcome_email_with_credentials(
         return False
 
 
+PAID_PLANS = ['indie', 'pro', 'enterprise']
+
+
+def get_all_features() -> list:
+    return [
+        "root_detection", "jailbreak_detection", "emulator_detection",
+        "debugger_detection", "secure_storage", "encryption",
+        "input_sanitization", "secure_random", "mitm_detection",
+        "frida_detection", "xposed_detection", "vpn_detection",
+        "proxy_detection", "ssl_pinning", "screenshot_blocking",
+        "usb_detection", "developer_mode_detection", "biometric_auth",
+        "device_fingerprint", "app_signature_verification",
+        "app_integrity_check", "anti_tampering", "anti_reverse_engineering",
+        "real_time_threat_stream", "behavior_monitoring", "security_metrics",
+        "remote_lock", "remote_wipe", "threat_reporting", "secure_api_calls",
+    ]
+
+
 # ══════════════════════════════════════════════════════════════
 # SCHEMAS
 # ══════════════════════════════════════════════════════════════
@@ -238,81 +256,13 @@ def root():
     }
 
 
-# ── 1. FREE TRIAL ─────────────────────────────────────────────
+# ── 1. FREE TRIAL — REMOVED ───────────────────────────────────
 @app.post("/trial")
-async def start_free_trial(body: TrialRequest, background_tasks: BackgroundTasks):
-    """
-    Start a 14-day free trial.
-    Called from the landing page email form.
-    No payment required.
-    """
-    email = body.email.lower().strip()
-
-    # Check if trial already exists for this email
-    existing = trials_col.where("email", "==", email).limit(1).get()
-    if list(existing):
-        raise HTTPException(
-            status_code=400,
-            detail="A trial license already exists for this email. Check your inbox."
-        )
-
-    # Generate license key
-    key = generate_license_key(plan="trial")
-    key_hash = hash_key(key)
-    expires_at = calculate_expiry("trial")
-    features = get_plan_features("trial")
-
-    # Save to Firebase Firestore — licenses collection
-    license_data = {
-        "key_hash": key_hash,          # Store hash, NOT plain key
-        "key_prefix": key[:8],         # USK-A1B2 — for display/search only
-        "email": email,
-        "name": body.name or "",
-        "plan": "trial",
-        "billing": "trial",
-        "status": "active",
-        "bundle_ids": [],              # Added when first validated
-        "app_limit": get_app_limit("trial"),
-        "features": features,
-        "created_at": datetime.utcnow(),
-        "expires_at": expires_at,
-        "trial": True,
-        "payment_id": None,
-    }
-    license_ref = licenses_col.document()
-    license_ref.set(license_data)
-
-    # Save to trials collection (for tracking)
-    trials_col.document().set({
-        "email": email,
-        "license_id": license_ref.id,
-        "created_at": datetime.utcnow(),
-    })
-
-    # Create Firebase Auth user + save to dashboard_users
-    temp_password = create_admin_user(
-        email=email,
-        name=body.name or "",
-        plan="trial",
+async def start_free_trial():
+    raise HTTPException(
+        status_code=410,
+        detail="Free trial is no longer available. Please purchase a plan at tejasai.io"
     )
-
-    # Send welcome email with license key + admin credentials
-    background_tasks.add_task(
-        send_welcome_email_with_credentials,
-        to_email=email,
-        license_key=key,
-        plan="trial",
-        buyer_name=body.name or "",
-        temp_password=temp_password,
-        expires_at=expires_at.strftime("%d %b %Y") if expires_at else "",
-    )
-
-    return {
-        "success": True,
-        "message": "Trial started! Check your email for the license key.",
-        "plan": "trial",
-        "expires_in_days": 14,
-    }
 
 
 # ── 2. VALIDATE LICENSE ───────────────────────────────────────
@@ -330,14 +280,25 @@ async def validate_license(body: ValidateRequest):
     docs = list(results)
 
     if not docs:
-        raise HTTPException(status_code=403, detail="Invalid license key")
+        return {"valid": False, "reason": "invalid_key", "message": "Invalid license key"}
 
     doc = docs[0]
     data = doc.to_dict()
 
+    # Paid plans only
+    plan = data.get("plan", "")
+    if plan not in PAID_PLANS:
+        return {
+            "valid": False,
+            "reason": "paid_plan_required",
+            "message": "Please purchase a plan to use Ultra Secure Flutter Kit",
+            "features": [],
+            "plan": plan,
+        }
+
     # Check status
     if data.get("status") != "active":
-        raise HTTPException(status_code=403, detail="License is inactive or cancelled")
+        return {"valid": False, "reason": "inactive", "message": "License is inactive or cancelled"}
 
     # Check expiry
     expires_at = data.get("expires_at")
@@ -345,13 +306,11 @@ async def validate_license(body: ValidateRequest):
         from datetime import timezone
         now = datetime.now(timezone.utc)
         exp = expires_at
-        # Firestore may return naive datetimes — treat them as UTC
         if hasattr(exp, 'tzinfo') and exp.tzinfo is None:
             exp = exp.replace(tzinfo=timezone.utc)
-
         if exp < now:
             doc.reference.update({"status": "expired"})
-            raise HTTPException(status_code=403, detail="License expired. Please renew.")
+            return {"valid": False, "reason": "expired", "message": "License expired. Please renew."}
 
     # Check bundle ID
     bundle_id = body.bundle_id
@@ -360,15 +319,15 @@ async def validate_license(body: ValidateRequest):
 
     if bundle_id not in bundle_ids:
         if len(bundle_ids) >= app_limit:
-            raise HTTPException(
-                status_code=403,
-                detail=f"App limit reached. This plan allows {app_limit} app(s). Contact support to upgrade."
-            )
-        # Auto-register this bundle ID
+            return {
+                "valid": False,
+                "reason": "app_limit_reached",
+                "message": f"App limit reached. This plan allows {app_limit} app(s). Contact support to upgrade.",
+            }
         bundle_ids.append(bundle_id)
         doc.reference.update({"bundle_ids": bundle_ids})
 
-    # Log usage (async — don't slow down validation)
+    # Log usage (don't fail validation if logging fails)
     try:
         usage_logs_col.document().set({
             "license_id": doc.id,
@@ -378,16 +337,16 @@ async def validate_license(body: ValidateRequest):
             "timestamp": datetime.utcnow(),
         })
     except Exception:
-        pass  # Don't fail validation if logging fails
+        pass
 
-    # Return features and plan info
     return {
         "valid": True,
-        "plan": data.get("plan"),
-        "features": data.get("features", get_plan_features(data.get("plan", "free"))),
+        "plan": plan,
+        "features": get_all_features(),
         "expires_at": expires_at.isoformat() if expires_at else None,
         "app_limit": app_limit,
         "registered_apps": len(bundle_ids),
+        "message": "License valid",
     }
 
 
@@ -512,10 +471,13 @@ async def create_license_manual(
     if x_admin_secret != os.getenv("APP_SECRET_KEY", ""):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
+    if body.plan not in PAID_PLANS:
+        raise HTTPException(status_code=400, detail=f"Invalid plan. Must be one of: {PAID_PLANS}")
+
     key = generate_license_key(plan=body.plan)
     key_hash = hash_key(key)
     expires_at = calculate_expiry(body.plan, body.billing)
-    features = get_plan_features(body.plan)
+    features = get_all_features()
 
     license_data = {
         "key_hash": key_hash,
